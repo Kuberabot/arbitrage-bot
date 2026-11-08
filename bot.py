@@ -1,4 +1,4 @@
-import os, threading, asyncio, ccxt, time
+import os, threading, asyncio, ccxt
 print("KUBERA Starting...", flush=True)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
