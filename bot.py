@@ -1,4 +1,104 @@
-import os, requests, time, threading
+import time, requests, itertools, os
+from flask import Flask
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Kuberabot 3-9 ANG LIVE"
+
+SYMBOLS = ["BTC", "ETH", "SOL", "BNB", "USDT", "XRP", "ADA", "DOGE"]
+BASE = "INR"
+CAPITAL = 3000
+FEE = 0.002 # 0.2% per trade
+MIN_PROFIT = 0.008 # 0.8% after fees
+
+def get_prices():
+    prices = {}
+    try:
+        # Get INR markets
+        r = requests.get("https://api.coindcx.com/exchange/ticker", timeout=5).json()
+        for item in r:
+            market = item.get('market','')
+            last = float(item.get('last_price',0) or 0)
+            if last>0:
+                prices[market]=last
+    except:
+        pass
+    return prices
+
+def calc_profit(prices, path):
+    # path = ['INR','BTC','ETH','INR'] 3-ang
+    amt = CAPITAL
+    try:
+        for i in range(len(path)-1):
+            a = path[i]
+            b = path[i+1]
+            # Find pair price
+            pair1 = f"{b}{a}" # e.g. BTCINR means 1 BTC = x INR, so INR->BTC = amt / price
+            pair2 = f"{a}{b}"
+            price = 0
+            if pair1 in prices:
+                # a->b : e.g. INR->BTC, pair is BTCINR, price is INR per BTC
+                price = prices[pair1]
+                amt = (amt / price) * (1-FEE)
+            elif pair2 in prices:
+                price = prices[pair2]
+                amt = (amt * price) * (1-FEE)
+            else:
+                return None
+            if amt<=0:
+                return None
+        profit_pct = (amt - CAPITAL)/CAPITAL*100
+        return amt, profit_pct
+    except:
+        return None
+
+def run_bot():
+    print("=== KUBERABOT 3-9 ANG RELOADED Rs3000 SAFE ===", flush=True)
+    while True:
+        try:
+            prices = get_prices()
+            if not prices:
+                time.sleep(5)
+                continue
+            
+            # Generate all paths 3 to 9 ang: INR -> ... -> INR
+            for length in range(3, 10): # 3 to 9
+                # length = number of edges, coins in middle = length-1
+                # We need permutations of SYMBOLS
+                for coins in itertools.permutations(SYMBOLS, length-1):
+                    path = [BASE] + list(coins) + [BASE] if length>2 else [BASE, coins[0], BASE]
+                    # For 3-ang: INR->BTC->ETH->INR would be length 3? Actually need 2 mids
+                    # Let's correct: 3-ang = INR->A->B->INR = length 3 edges, 2 mids
+                    # So we already did: for length=3, we need 2 coins
+                    if len(path)-1 != length:
+                        continue
+                    # Avoid too many: limit to first 4 coins for 8-9 ang to prevent crash
+                    if length>=7 and len(set(coins))<length-1:
+                        continue
+
+                    res = calc_profit(prices, path)
+                    if not res:
+                        continue
+                    amt, pct = res
+                    path_str = "->".join(path)
+                    if pct >= MIN_PROFIT*100:
+                        print(f"PROFIT {length}-ANG: {path_str} | Rs{CAPITAL} -> Rs{amt:.2f} ({pct:.2f}%)", flush=True)
+                    else:
+                        # Print only some to avoid log flood - print every 20th
+                        if length==3 or length==4:
+                            print(f"Scan {length}-ang {path_str} : {pct:.2f}%", flush=True)
+            time.sleep(15)
+        except Exception as e:
+            print(f"Error loop: {e}", flush=True)
+            time.sleep(5)
+
+import threading
+threading.Thread(target=run_bot, daemon=True).start()
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT",10000)))import os, requests, time, threading
 from flask import Flask
 app = Flask(__name__)
 
