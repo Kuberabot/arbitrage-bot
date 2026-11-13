@@ -18,7 +18,9 @@ def get_prices():
                     m[x['market']] = price
             except: pass
         return m
-    except: return {}def calc(path, markets):
+    except:
+        return {}
+def calc(path, markets):
     amt = START_INR
     first = f"{path[0]}INR"
     if first not in markets: return 0,0
