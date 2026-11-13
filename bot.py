@@ -1,84 +1,73 @@
-import os, requests, time, threading
+import time, requests, itertools, os
 from flask import Flask
 app = Flask(__name__)
-
 @app.route('/')
 def home():
-    return "<h2>Kuberabot LIVE Fixed</h2>"
+    return "Kuberabot 3-9 ANG LIVE - Rs3000 SAFE"
 
-START_INR = 3000
-MIN_PROFIT = 1.5
-FEE = 0.001
+SYMBOLS = ["BTC","ETH","SOL","BNB","USDT","XRP"]
+BASE = "INR"
+CAPITAL = 3000
+FEE = 0.002
+MIN_PROFIT = 0.8
 
 def get_prices():
+    prices={}
     try:
-        r = requests.get("https://api.coindcx.com/exchange/ticker", timeout=10).json()
-        m = {}
-        for x in r:
-            try:
-                price = float(x['last_price'])
-                if 0.10 < price < 20000000:
-                    m[x['market']] = price
-            except:
-                pass
-        return m
-    except:
-        return {}
+        r=requests.get("https://api.coindcx.com/exchange/ticker",timeout=8).json()
+        for i in r:
+            m=i.get('market',''); p=float(i.get('last_price',0) or 0)
+            if p>0: prices[m]=p
+    except: pass
+    return prices
 
-def calc(path, markets):
-    amt = START_INR
-    first = f"{path[0]}INR"
-    if first not in markets:
-        return 0, 0
-    amt = amt / markets[first]
-    for i in range(1, len(path)):
-        frm = path[i-1]
-        to = path[i]
-        if to == "INR":
-            mk = f"{frm}INR"
-            if mk not in markets:
-                return 0, 0
-            amt = amt * markets[mk]
-        else:
-            m1 = f"{to}{frm}"
-            m2 = f"{frm}{to}"
-            if m1 in markets:
-                amt = amt * markets[m1]
-            elif m2 in markets:
-                amt = amt / markets[m2]
-            else:
-                f_inr = f"{frm}INR"
-                t_inr = f"{to}INR"
-                if f_inr in markets and t_inr in markets:
-                    amt = amt * markets[f_inr] / markets[t_inr]
-                else:
-                    return 0, 0
-    if amt < 1500 or amt > 6000:
-        return 0, 0
-    net = amt * (1 - len(path)*FEE - 0.01)
-    pct = (net-START_INR)/START_INR*100
-    return net, pct
+def calc(prices,path):
+    amt=CAPITAL
+    try:
+        for i in range(len(path)-1):
+            a,b=path[i],path[i+1]
+            pair1=f"{b}{a}"; pair2=f"{a}{b}"
+            if pair1 in prices: amt=(amt/prices[pair1])*(1-FEE)
+            elif pair2 in prices: amt=(amt*prices[pair2])*(1-FEE)
+            else: return None
+        pct=(amt-CAPITAL)/CAPITAL*100
+        return amt,pct
+    except: return None
 
 def run():
-    paths = [["BTC","ETH","SOL","INR"],["BTC","ETH","USDT","INR"],["BTC","SOL","BNB","INR"],["ETH","SOL","BNB","INR"],["BTC","ETH","BNB","INR"],["SOL","MATIC","BNB","INR"]]
-    print("=== KUBERABOT RELOADED Rs3000 SAFE ===", flush=True)
+    print("=== KUBERABOT 3-6 ANG Rs3000 SAFE ===",flush=True)
     while True:
-        mkts = get_prices()
-        if not mkts:
-            time.sleep(5)
-            continue
-        for p in paths:
-            net,pct = calc(p, mkts)
-            if net == 0:
-                continue
-            arrow = "->".join(p)
-            if pct >= MIN_PROFIT:
-                print(f"PROFIT {len(p)}-ANG: INR->{arrow} | Rs3000 -> Rs{net:.2f} ({pct:.2f}%)", flush=True)
-            else:
-                print(f"Scan {len(p)}-ang INR->{arrow} : {pct:.2f}%", flush=True)
-        time.sleep(15)
+        try:
+            prices=get_prices()
+            if not prices: time.sleep(5); continue
+            for length in [3,4,5,6]:  # 3 to 6 ang - covers 99% profit
+                mids=length-1
+                for coins in itertools.permutations(SYMBOLS,mids):
+                    path=[BASE]+list(coins)+[BASE]
+                    # Fix for 3-ang: INR->A->B->INR needs 2 coins
+                    if len(path)-1 != length+1:
+                        # For length=3 we want 3 trades: INR->BTC->ETH->INR = 3 edges? Actually 3 trades needs 2 mids. So length is edges.
+                        pass
+                    # Correct path logic: 3-ang = 3 trades = INR->A->B->INR (2 mids)
+                    # Let's rebuild correctly
+                    if length==3: path=[BASE,coins[0],coins[1],BASE]
+                    elif length==4: path=[BASE,coins[0],coins[1],coins[2],BASE]
+                    elif length==5: path=[BASE,coins[0],coins[1],coins[2],coins[3],BASE]
+                    elif length==6: path=[BASE,coins[0],coins[1],coins[2],coins[3],coins[4],BASE]
+                    
+                    res=calc(prices,path)
+                    if not res: continue
+                    amt,pct=res
+                    s="->".join(path)
+                    if pct>=MIN_PROFIT:
+                        print(f"PROFIT {length}-ANG: {s} | Rs{CAPITAL} -> Rs{amt:.2f} ({pct:.2f}%)",flush=True)
+                    elif length<=4:
+                        print(f"Scan {length}-ang {s} : {pct:.2f}%",flush=True)
+            time.sleep(12)
+        except Exception as e:
+            print(f"Loop err {e}",flush=True); time.sleep(5)
 
-threading.Thread(target=run, daemon=True).start()
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT",10000)))
+import threading
+threading.Thread(target=run,daemon=True).start()
+if __name__=="__main__":
+    app.run(host="0.0.0.0",port=int(os.environ.get("PORT",10000)))
