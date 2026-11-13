@@ -1,5 +1,3 @@
 Flask
-ccxt
-python-telegram-bot
 requests
-python-dotenv
+gunicorn
