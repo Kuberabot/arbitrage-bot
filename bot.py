@@ -1,57 +1,83 @@
-import os, threading, asyncio, ccxt
-print("KUBERA Starting...", flush=True)
+import os, requests, time, threading
+from flask import Flask
+from collections import defaultdict
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+app = Flask(__name__)
+@app.route('/')
+def home():
+    return f"<h1>Kuberabot LIVE | ₹3000 Capital | Scanning 4-6 Angular</h1><p>Target: ₹3000/day in 60 days | Capital: ₹{START_INR}</p>"
 
-telegram_bot = None
-try:
-    from telegram import Bot
-    if TELEGRAM_TOKEN:
-        telegram_bot = Bot(token=TELEGRAM_TOKEN)
-except:
-    pass
+START_INR = 3000
+MIN_PROFIT_PCT = 2.2
+MAX_LEGS = 6
+LIVE_TRADING = False
 
-async def send_tg(msg):
-    print(msg, flush=True)
-    if telegram_bot and TELEGRAM_CHAT_ID:
-        try:
-            await telegram_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg)
-        except:
-            pass
-
-exchanges = {
-    'binance': ccxt.binance({'enableRateLimit': True}),
-    'kucoin': ccxt.kucoin({'enableRateLimit': True}),
-}
-
-def get_tickers(ex):
+def get_markets():
     try:
-        return ex.fetch_tickers()
-    except:
-        return {}
+        r = requests.get("https://api.coindcx.com/exchange/ticker", timeout=10)
+        data = r.json()
+        markets = {}
+        for d in data:
+            m=d['market']; p=float(d['last_price'])
+            if p>0: markets[m]=p
+        return markets
+    except: return {}
 
-async def bot_loop():
-    await send_tg("🚀 KUBERA BOT LIVE")
-    while True:
+def find_arbitrage():
+    markets = get_markets()
+    if not markets: return
+    paths = [
+        ["BTC","ETH","SOL","INR"],
+        ["BTC","ETH","USDT","INR"],
+        ["BTC","SOL","DOGE","INR"],
+        ["ETH","SOL","MATIC","INR"],
+        ["BTC","ETH","SOL","BNB","INR"],
+        ["BTC","AVAX","MATIC","USDT","INR"],
+        ["DOGE","SHIB","PEPE","USDT","INR"],
+        ["BTC","ETH","SOL","AVAX","MATIC","INR"],
+    ]
+    for path in paths:
         try:
-            for ex_name, ex in exchanges.items():
-                tickers = get_tickers(ex)
-                print(f"{ex_name}: {len(tickers)} tickers", flush=True)
-            await asyncio.sleep(30)
-        except Exception as e:
-            print(f"Error: {e}", flush=True)
-            await asyncio.sleep(10)
+            amount = START_INR
+            prev = "INR"
+            # INR->first
+            if f"{path[0]}INR" in markets:
+                amount = amount / markets[f"{path[0]}INR"]
+                prev = path[0]
+            else: continue
+            # middle hops
+            for i in range(1,len(path)):
+                fr=path[i-1]; to=path[i]
+                if to=="INR":
+                    if f"{fr}INR" in markets: amount = amount * markets[f"{fr}INR"]
+                    else: amount=0; break
+                else:
+                    m1=f"{to}{fr}"; m2=f"{fr}{to}"
+                    if m1 in markets: amount = amount * markets[m1]
+                    elif m2 in markets: amount = amount / markets[m2]
+                    else:
+                        if f"{fr}INR" in markets and f"{to}INR" in markets:
+                            inr_val = amount * markets[f"{fr}INR"]
+                            amount = inr_val / markets[f"{to}INR"]
+                        else: amount=0; break
+            if amount>0:
+                fee = (len(path))*0.002*amount
+                tds = amount*0.01
+                net = amount - fee - tds
+                profit = net - START_INR
+                pct = (profit/START_INR)*100
+                if pct >= MIN_PROFIT_PCT:
+                    print(f"✅ PROFIT {len(path)}-ANG: {'->'.join(['INR']+path)} | ₹{START_INR} -> ₹{net:.2f} | +{pct:.2f}% = +₹{profit:.2f}", flush=True)
+                else:
+                    print(f"Scan {len(path)}-ang INR->{ '->'.join(path)} : {pct:.2f}%", flush=True)
+        except Exception as e: pass
 
-def run_flask():
-    from flask import Flask
-    app = Flask(__name__)
-    @app.route('/')
-    def home():
-        return "KUBERA LIVE - OK"
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+def loop():
+    print(f"===== KUBERABOT STARTED ₹{START_INR} =====", flush=True)
+    while True:
+        find_arbitrage()
+        time.sleep(12)
 
-if __name__ == "__main__":
-    threading.Thread(target=run_flask, daemon=True).start()
-    asyncio.run(bot_loop())
+threading.Thread(target=loop, daemon=True).start()
+if __name__=="__main__":
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT",10000)))
