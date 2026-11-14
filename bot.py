@@ -1,117 +1,112 @@
 
-import time, requests, itertools, os
+import time, requests, threading
 from flask import Flask
+from datetime import datetime
+
 app = Flask(__name__)
 
-# ===== YOUR REAL MONEY SETTINGS =====
-BASE = "INR"
+# ===== Rs3000 DAILY PROFIT V2 - FIXED =====
 CAP = 3000.0
-FEE = 0.002  # 0.2% per trade
-SLIPPAGE = 0.005  # 0.5% extra for bid/ask difference - THIS MAKES IT REALISTIC
-MINP_REAL = 0.8  # Trade only if real profit >0.8% after fees+slippage
+BALANCE = 3000.0
+PROFIT = 0.0
+TRADES = 0
+MIN_REAL_PROFIT = 0.35  # <--- FIXED FROM 0.8 to 0.35 FOR DAILY PROFIT
+DAILY_TARGET = 30.0
+MAX_LOSS = 100.0
 
-# Only high liquidity coins - paper profit = real profit here
-HIGH_VOLUME_COINS = ["BTC","ETH","XRP","SOL","DOGE","SHIB","ADA","AVAX","LINK","MATIC","DOT","LTC","TRX","UNI","ETC","BCH","ATOM","XLM","NEAR","FIL","PEPE","BONK","WIF","FLOKI","USDT"]
+# 35 high-liquidity coins = more triangles
+REAL_COINS = ['BTC','ETH','XRP','SOL','DOGE','SHIB','ADA','AVAX','MATIC','DOT','LTC','TRX','BCH','LINK','UNI','ETC','XLM','ATOM','NEAR','FIL','PEPE','FLOKI','BONK','WIF','ENA','TAO','RENDER','ARB','OP','SUI','APT','INJ','SEI','JASMY']
 
-# ===== PAPER BALANCE =====
-balance = 3000.0
-total_profit = 0.0
-trades = 0
+balance_lock = threading.Lock()
+last_scan = {}
+scan_no = 0
+daily_profit = 0.0
+start_of_day = datetime.now().date()
 
-@app.route('/')
-def home():
-    return f"KUBERABOT REAL-MODE LIVE | Balance Rs{balance:.1f} | Profit Rs{total_profit:.1f} | Trades {trades} | Cap Rs{CAP}"
-
-def get_all():
+def get_prices():
     try:
-        # Get ticker
-        r = requests.get("https://api.coindcx.com/exchange/ticker", timeout=15).json()
+        r = requests.get("https://api.coindcx.com/exchange/ticker", timeout=10)
+        data = r.json()
         prices = {}
-        all_coins = []
-        for i in r:
-            m = i.get('market','')
-            try: p = float(i.get('last_price',0))
-            except: continue
-            if p <= 0: continue
-            prices[m] = p
-            if m.endswith(BASE):
-                c = m.replace(BASE,'')
-                if c and c != BASE and c not in all_coins:
-                    all_coins.append(c)
-        return prices, all_coins
-    except Exception as e:
-        print(f"API FAIL {e}", flush=True)
-        return {}, []
-
-def calc_real_profit(pr, path):
-    """Calculate REAL profit after fees + slippage"""
-    a = CAP
-    try:
-        for j in range(len(path)-1):
-            x, y = path[j], path[j+1]
-            if (y+x) in pr:
-                # Buy with x, get y
-                a = (a / pr[y+x]) * (1 - FEE - SLIPPAGE)
-            elif (x+y) in pr:
-                # Sell x for y
-                a = (a * pr[x+y]) * (1 - FEE - SLIPPAGE)
-            else:
-                return None
-        profit_pct = (a - CAP) / CAP * 100
-        return a, profit_pct
+        for item in data:
+            prices[item['market']] = float(item['last_price'])
+        return prices
     except:
-        return None
+        return {}
 
-def run():
-    global balance, total_profit, trades
-    print(f"=== REAL-PROFIT BOT STARTED ===", flush=True)
-    print(f"CAP Rs{CAP} FEE {FEE*100}% SLIPPAGE {SLIPPAGE*100}% MIN_REAL_PROFIT {MINP_REAL}%", flush=True)
-    print(f"TRADING ONLY HIGH VOLUME COINS: {HIGH_VOLUME_COINS}", flush=True)
-    print(f"MODE: PAPER TRADING WITH REALISTIC PROFIT (no real money)", flush=True)
-    scan = 0
+def scan_loop():
+    global BALANCE, PROFIT, TRADES, last_scan, scan_no, daily_profit, start_of_day
+    print("=== Rs3000 DAILY PROFIT V2 STARTED - Target Rs30/day - Filter 0.35% ===")
     while True:
-        scan += 1
-        pr, all_coins = get_all()
-        if not all_coins:
-            time.sleep(5)
+        if datetime.now().date() != start_of_day:
+            print(f"=== DAILY SUMMARY {start_of_day}: Trades {TRADES}, Daily Profit Rs{daily_profit:.2f} ===")
+            daily_profit = 0.0
+            start_of_day = datetime.now().date()
+
+        scan_no += 1
+        prices = get_prices()
+        if not prices:
+            time.sleep(12)
             continue
         
-        # Filter only high volume coins for real trading
-        coins = [c for c in all_coins if c in HIGH_VOLUME_COINS]
+        best_profit = 0
+        best_path = ""
         
-        print(f"\n--- SCAN #{scan} {time.strftime('%H:%M:%S')} AllCoins={len(all_coins)} RealCoins={len(coins)} BAL=Rs{balance:.1f} PROFIT=Rs{total_profit:.1f} ---", flush=True)
+        for a in REAL_COINS:
+            if f"{a}INR" not in prices: continue
+            for b in REAL_COINS:
+                if a==b: continue
+                if f"{b}INR" not in prices: continue
+                # Check both directions
+                for pair in [f"{b}{a}", f"{a}{b}"]:
+                    if pair in prices:
+                        try:
+                            pa = prices[f"{a}INR"]
+                            pb = prices[f"{b}INR"]
+                            pab = prices[pair]
+                            if pair == f"{b}{a}":
+                                ratio = (pa / pb) * pab if pb>0 and pab>0 else 0
+                            else:
+                                ratio = (pa / pb) / pab if pb>0 and pab>0 else 0
+                            profit_pct = (ratio - 1) * 100
+                            net = profit_pct - 1.1  # fee+slippage
+                            if net > best_profit and net >= MIN_REAL_PROFIT:
+                                best_profit = net
+                                best_path = f"INR->{a}->{b}->INR via {pair}"
+                        except:
+                            pass
         
-        best = None
-        for c1, c2 in itertools.permutations(coins, 2):
-            path = [BASE, c1, c2, BASE]
-            res = calc_real_profit(pr, path)
-            if not res:
-                continue
-            amt, pct = res
-            # Show only real profits
-            if pct >= 0.3:
-                print(f"Real {pct:.2f}% {'->'.join(path)} -> Rs{amt:.1f}", flush=True)
-            
-            if pct >= MINP_REAL:
-                # REAL PAPER TRADE
-                profit_rs = amt - CAP
-                balance += profit_rs
-                total_profit += profit_rs
-                trades += 1
-                print(f"*** REAL PAPER TRADE #{trades} PROFIT {pct:.2f}% {'->'.join(path)} +Rs{profit_rs:.1f} BALANCE Rs{balance:.1f} ***", flush=True)
-                best = (path, pct, profit_rs)
-                time.sleep(1)
-                break  # Trade 1 per scan to avoid over-trading
-        
-        if not best:
-            print(f"No REAL profit >{MINP_REAL}% this scan - Balance Rs{balance:.1f}", flush=True)
-        else:
-            print(f"=== TOTAL: {trades} trades | Profit Rs{total_profit:.1f} | Balance Rs{balance:.1f} ===", flush=True)
-        
-        time.sleep(12)
+        with balance_lock:
+            current_bal = BALANCE
+            current_profit = PROFIT
 
-import threading
-threading.Thread(target=run, daemon=True).start()
+        if current_bal < (CAP - MAX_LOSS):
+            print(f"STOP LOSS - Balance Rs{current_bal:.1f}")
+            time.sleep(60)
+            continue
+
+        if best_profit >= MIN_REAL_PROFIT:
+            trade_amt = min(CAP, current_bal)
+            profit_rs = trade_amt * best_profit / 100
+            with balance_lock:
+                BALANCE += profit_rs
+                PROFIT += profit_rs
+                TRADES += 1
+                daily_profit += profit_rs
+                last_scan = {"path": best_path, "profit%": round(best_profit,3), "profitRs": round(profit_rs,2), "balance": round(BALANCE,2)}
+            print(f"*** REAL PAPER TRADE #{TRADES} {best_path} PROFIT {best_profit:.3f}% +Rs{profit_rs:.2f} BAL Rs{BALANCE:.2f} DAILY Rs{daily_profit:.2f} ***")
+        else:
+            # Show closest profit to know market
+            print(f"SCAN #{scan_no} All={len(prices)} Best={best_profit:.3f}% <{MIN_REAL_PROFIT}% - No trade - BAL Rs{current_bal:.1f} DAILY Rs{daily_profit:.1f}")
+        
+        time.sleep(10)
+
+threading.Thread(target=scan_loop, daemon=True).start()
+
+@app.route("/")
+def home():
+    with balance_lock:
+        return f"V2 Rs3000 DAILY LIVE | BAL Rs{BALANCE:.1f} | PROFIT Rs{PROFIT:.1f} | DAILY Rs{daily_profit:.1f} | TRADES {TRADES} | TARGET Rs{DAILY_TARGET}/day | Last {last_scan} | Scans {scan_no}"
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT",10000)))
+    app.run(host="0.0.0.0", port=10000)
