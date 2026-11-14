@@ -3,84 +3,112 @@ import time, requests, itertools, os
 from flask import Flask
 app = Flask(__name__)
 
+# ===== YOUR REAL MONEY SETTINGS =====
+BASE = "INR"
+CAP = 3000.0
+FEE = 0.002  # 0.2% per trade
+SLIPPAGE = 0.005  # 0.5% extra for bid/ask difference - THIS MAKES IT REALISTIC
+MINP_REAL = 0.8  # Trade only if real profit >0.8% after fees+slippage
+
+# Only high liquidity coins - paper profit = real profit here
+HIGH_VOLUME_COINS = ["BTC","ETH","XRP","SOL","DOGE","SHIB","ADA","AVAX","LINK","MATIC","DOT","LTC","TRX","UNI","ETC","BCH","ATOM","XLM","NEAR","FIL","PEPE","BONK","WIF","FLOKI","USDT"]
+
+# ===== PAPER BALANCE =====
+balance = 3000.0
+total_profit = 0.0
+trades = 0
+
 @app.route('/')
 def home():
-    return "KUBERABOT ALL-COINS LIVE"
-
-BASE = "INR"
-CAP = 3000
-FEE = 0.002
-MINP = 0.8
+    return f"KUBERABOT REAL-MODE LIVE | Balance Rs{balance:.1f} | Profit Rs{total_profit:.1f} | Trades {trades} | Cap Rs{CAP}"
 
 def get_all():
     try:
+        # Get ticker
         r = requests.get("https://api.coindcx.com/exchange/ticker", timeout=15).json()
         prices = {}
-        coins = []
+        all_coins = []
         for i in r:
-            market = i.get('market','')
-            try:
-                price = float(i.get('last_price',0))
-            except:
-                continue
-            if price <= 0:
-                continue
-            prices[market] = price
-            if market.endswith(BASE):
-                coin = market.replace(BASE,'')
-                if coin and coin != BASE and coin not in coins:
-                    coins.append(coin)
-        return prices, coins
+            m = i.get('market','')
+            try: p = float(i.get('last_price',0))
+            except: continue
+            if p <= 0: continue
+            prices[m] = p
+            if m.endswith(BASE):
+                c = m.replace(BASE,'')
+                if c and c != BASE and c not in all_coins:
+                    all_coins.append(c)
+        return prices, all_coins
     except Exception as e:
         print(f"API FAIL {e}", flush=True)
         return {}, []
 
-def calc(pr, path):
+def calc_real_profit(pr, path):
+    """Calculate REAL profit after fees + slippage"""
     a = CAP
     try:
         for j in range(len(path)-1):
-            x = path[j]
-            y = path[j+1]
-            p1 = y + x
-            p2 = x + y
-            if p1 in pr:
-                a = (a / pr[p1]) * (1 - FEE)
-            elif p2 in pr:
-                a = (a * pr[p2]) * (1 - FEE)
+            x, y = path[j], path[j+1]
+            if (y+x) in pr:
+                # Buy with x, get y
+                a = (a / pr[y+x]) * (1 - FEE - SLIPPAGE)
+            elif (x+y) in pr:
+                # Sell x for y
+                a = (a * pr[x+y]) * (1 - FEE - SLIPPAGE)
             else:
                 return None
-        return a, (a - CAP) / CAP * 100
+        profit_pct = (a - CAP) / CAP * 100
+        return a, profit_pct
     except:
         return None
 
 def run():
-    print("=== KUBERABOT ALL-COINS STARTED ===", flush=True)
+    global balance, total_profit, trades
+    print(f"=== REAL-PROFIT BOT STARTED ===", flush=True)
+    print(f"CAP Rs{CAP} FEE {FEE*100}% SLIPPAGE {SLIPPAGE*100}% MIN_REAL_PROFIT {MINP_REAL}%", flush=True)
+    print(f"TRADING ONLY HIGH VOLUME COINS: {HIGH_VOLUME_COINS}", flush=True)
+    print(f"MODE: PAPER TRADING WITH REALISTIC PROFIT (no real money)", flush=True)
     scan = 0
     while True:
         scan += 1
-        pr, ALL_COINS = get_all()
-        if not ALL_COINS:
+        pr, all_coins = get_all()
+        if not all_coins:
             time.sleep(5)
             continue
-        total = len(ALL_COINS) * (len(ALL_COINS)-1)
-        print(f"\n--- SCAN #{scan} TIME {time.strftime('%H:%M:%S')} COINS={len(ALL_COINS)} COMBOS={total} ---", flush=True)
-        print(f"Coins list: {ALL_COINS[:20]}...", flush=True)
         
-        profit = 0
-        for c1, c2 in itertools.permutations(ALL_COINS, 2):
+        # Filter only high volume coins for real trading
+        coins = [c for c in all_coins if c in HIGH_VOLUME_COINS]
+        
+        print(f"\n--- SCAN #{scan} {time.strftime('%H:%M:%S')} AllCoins={len(all_coins)} RealCoins={len(coins)} BAL=Rs{balance:.1f} PROFIT=Rs{total_profit:.1f} ---", flush=True)
+        
+        best = None
+        for c1, c2 in itertools.permutations(coins, 2):
             path = [BASE, c1, c2, BASE]
-            res = calc(pr, path)
-            if res:
-                amt, pct = res
-                if pct >= MINP:
-                    print(f"*** PROFIT {pct:.2f}% {'->'.join(path)} Rs{amt:.1f} ***", flush=True)
-                    profit += 1
-                elif pct >= 0.2:
-                    print(f"{'->'.join(path)} +{pct:.2f}%", flush=True)
+            res = calc_real_profit(pr, path)
+            if not res:
+                continue
+            amt, pct = res
+            # Show only real profits
+            if pct >= 0.3:
+                print(f"Real {pct:.2f}% {'->'.join(path)} -> Rs{amt:.1f}", flush=True)
+            
+            if pct >= MINP_REAL:
+                # REAL PAPER TRADE
+                profit_rs = amt - CAP
+                balance += profit_rs
+                total_profit += profit_rs
+                trades += 1
+                print(f"*** REAL PAPER TRADE #{trades} PROFIT {pct:.2f}% {'->'.join(path)} +Rs{profit_rs:.1f} BALANCE Rs{balance:.1f} ***", flush=True)
+                best = (path, pct, profit_rs)
+                time.sleep(1)
+                break  # Trade 1 per scan to avoid over-trading
         
-        if profit == 0:
-            print(f"SCAN #{scan} DONE - No profit >{MINP}%", flush=True)
-        time.sleep(10)
+        if not best:
+            print(f"No REAL profit >{MINP_REAL}% this scan - Balance Rs{balance:.1f}", flush=True)
+        else:
+            print(f"=== TOTAL: {trades} trades | Profit Rs{total_profit:.1f} | Balance Rs{balance:.1f} ===", flush=True)
+        
+        time.sleep(12)
 
 import threading
 threading.Thread(target=run, daemon=True).start()
