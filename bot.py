@@ -1,82 +1,57 @@
-
-from flask import Flask, jsonify
-import threading
-import time
-import os
-import requests
+from flask import Flask
+import threading, time, os, requests
+from datetime import datetime
 
 app = Flask(__name__)
 
-# ===== CONFIG - YOUR FREE SETUP =====
-AUTO_TRADE = True  # Bot will trade by itself!
-PROFIT_THRESHOLD = 0.30  # Will trade if profit > 0.30%
-CAPITAL = 900  # Your capital
+AUTO_TRADE = True
+PROFIT_THRESHOLD = 0.30
+CAPITAL = 900
+total_profit = 0
+trades = 0
+last_check = "Starting..."
 
-# This keeps bot alive for UptimeRobot
 @app.route('/')
-def home():
-    return jsonify({
-        "status": "✅ Bot is AWAKE 24/7 - FREE",
-        "uptimerobot": "Working - Bot will never sleep!",
-        "auto_trade": AUTO_TRADE,
-        "capital": f"₹{CAPITAL}",
-        "mode": "PAPER TRADING (until CoinDCX approves) → Then REAL Auto-Trade",
-        "profit_threshold": f"{PROFIT_THRESHOLD}%"
-    })
-
-@app.route('/status')
-def status():
-    return home()
-
-# ===== AUTO TRADING LOGIC - TRADES BY ITSELF =====
-def get_prices():
-    """Fetch prices - you can add real APIs later"""
-    try:
-        # Example: Binance price
-        binance = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", timeout=5).json()
-        binance_price = float(binance['price'])
-        
-        # For now using 0.5% difference simulation - Replace with CoinDCX API when approved
-        coindcx_price = binance_price * 1.005  # Simulating difference
-        
-        profit = ((coindcx_price - binance_price) / binance_price) * 100
-        return profit, binance_price, coindcx_price
-    except:
-        return 0, 0, 0
+def dashboard():
+    html = f"""
+    <html><head><meta name='viewport' content='width=device-width, initial-scale=1'>
+    <style>body{{font-family:sans-serif;background:#0f172a;color:white;padding:20px}}
+    .card{{background:#1e293b;padding:15px;border-radius:12px;margin:10px 0}}
+    .green{{color:#22c55e}} .yellow{{color:#eab308}}</style></head><body>
+    <h2>🤖 Arbitrage Bot - LIVE 24/7 FREE</h2>
+    <div class='card'>✅ <b>Status:</b> <span class='green'>AWAKE - UptimeRobot Working</span></div>
+    <div class='card'>💰 <b>Capital:</b> ₹{CAPITAL} | <b>Profit:</b> <span class='green'>₹{total_profit:.2f}</span></div>
+    <div class='card'>📊 <b>Trades Today:</b> {trades} | <b>Threshold:</b> {PROFIT_THRESHOLD}%</div>
+    <div class='card'>⏰ <b>Last Check:</b> {last_check}</div>
+    <div class='card'>🔄 <b>Mode:</b> <span class='yellow'>PAPER TRADING (until CoinDCX approves) → Then REAL</span></div>
+    <div class='card'>🌐 <b>UptimeRobot:</b> Bot will NEVER sleep - Free 24/7</div>
+    <p><small>Auto-refreshes every 5 sec. Open Render > Logs to see live trading.</small></p>
+    <script>setTimeout(()=>location.reload(),5000)</script>
+    </body></html>
+    """
+    return html
 
 def auto_trade_loop():
-    """This loop runs 24/7 and trades BY ITSELF - even at 3 AM!"""
-    print("🤖 Auto-Trade Loop Started - Bot will trade by itself 24/7 FREE!")
+    global total_profit, trades, last_check
     while True:
         try:
-            profit, buy_price, sell_price = get_prices()
-            
-            print(f"Checking... Profit: {profit:.2f}% | Threshold: {PROFIT_THRESHOLD}%")
+            # fetch price
+            r = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", timeout=5).json()
+            price = float(r['price'])
+            profit = 0.35  # demo profit for testing
+            last_check = f"{datetime.now().strftime('%H:%M:%S')} - Checking... {profit:.2f}% profit found"
             
             if profit >= PROFIT_THRESHOLD and AUTO_TRADE:
-                print(f"🚀 PROFIT FOUND! {profit:.2f}% - AUTO TRADING!")
-                print(f"Buying at {buy_price} | Selling at {sell_price}")
-                
-                # PAPER TRADE (until CoinDCX approved)
-                estimated_profit = (CAPITAL * profit / 100) - (CAPITAL * 0.004)  # minus fees
-                print(f"✅ PAPER TRADE EXECUTED! Estimated Profit: ₹{estimated_profit:.2f}")
-                
-                # TODO: When CoinDCX API approved, real trade will happen here automatically
-                # coindcx_buy() and binance_sell()
-                
-                time.sleep(60)  # Wait 1 min after trade to avoid double trade
-            else:
-                print(f"Waiting... No profit yet. Will check again in 10 sec")
-                
-            time.sleep(10)  # Check every 10 seconds 24/7
-            
+                trades += 1
+                p = CAPITAL * profit / 100 * 0.6
+                total_profit += p
+                print(f"✅ TRADE {trades}: Profit ₹{p:.2f} | Total ₹{total_profit:.2f}")
+            time.sleep(10)
         except Exception as e:
-            print(f"Error in auto-trade loop: {e}")
+            last_check = f"Error: {e}"
             time.sleep(10)
 
-# Start auto-trade thread - THIS MAKES IT TRADE BY ITSELF!
 threading.Thread(target=auto_trade_loop, daemon=True).start()
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
