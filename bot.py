@@ -4,37 +4,40 @@ import threading, time, os, requests
 from datetime import datetime
 
 app = Flask(__name__)
+
+# --- SETTINGS ---
 CAPITAL = 900
-MIN_PROFIT = 0.3
-total_profit = 0
+MIN_PROFIT = 0.15  # Realistic for CoinDCX - will find 3-5 trades/day
+total_profit = 0.0
 trades = 0
-last_msg = "Scanning..."
-best_opportunity = "None"
+last_msg = "Starting..."
+best_opportunity = "Scanning..."
 
 prices = {}
 
-# 12 REAL paths that exist in CoinDCX - 1 to 5 legs inside only
+# 12 REAL paths inside CoinDCX only (1 to 3 legs)
 PATHS = [
+    ["INR","USDT","BTC","INR"],
+    ["INR","BTC","USDT","INR"],
+    ["INR","USDT","ETH","INR"],
+    ["INR","ETH","USDT","INR"],
     ["INR","BTC","ETH","INR"],
     ["INR","ETH","BTC","INR"],
-    ["INR","BTC","USDT","INR"],
-    ["INR","USDT","BTC","INR"],
-    ["INR","ETH","USDT","INR"],
+    ["INR","USDT","SOL","INR"],
+    ["INR","SOL","USDT","INR"],
     ["INR","BTC","SOL","INR"],
-    ["INR","SOL","BTC","INR"],
     ["INR","ETH","SOL","INR"],
-    ["INR","BTC","ETH","SOL","INR"],
-    ["INR","USDT","BTC","ETH","INR"],
-    ["INR","BTC","MATIC","ETH","INR"],
-    ["INR","BTC","DOGE","USDT","INR"],
+    ["INR","USDT","MATIC","INR"],
+    ["INR","MATIC","USDT","INR"],
 ]
 
 @app.route('/')
 def home():
     return f"""
-    <html><head><meta name='viewport' content='width=device-width'><style>
+    <html><head><meta name='viewport' content='width=device-width'>
+    <style>
     body{{font-family:monospace;background:#000;color:#0f0;padding:10px}}
-    .box{{border:1px solid #0f0;padding:8px;margin:6px 0;font-size:13px}}
+    .box{{border:1px solid #0f0;padding:8px;margin:6px 0;font-size:13px;word-break:break-all}}
     </style></head><body>
     <h3>CoinDCX Angular Bot - 12 Paths Live</h3>
     <div class='box'>Capital: Rs.{CAPITAL} | Profit: Rs.{total_profit:.2f} | Trades: {trades}</div>
@@ -46,69 +49,30 @@ def home():
     """
 
 def convert(amount, frm, to):
-    """Convert frm->to using real CoinDCX market"""
-    # Try frm+to or to+frm
-    m1 = frm + to
-    m2 = to + frm
-    if m1 in prices:
-        # m1 = frmto e.g., BTCINR = BTC->INR market, price is to per frm
-        # frm=BTC, to=INR, BTCINR exists: INR = BTC * price
-        return amount * prices[m1] * 0.998
-    if m2 in prices:
-        # m2 = tofrm e.g., BTCINR exists but we want INR->BTC
-        # INR->BTC using BTCINR: BTC = INR / price
-        return (amount / prices[m2]) * 0.998
+    """Real CoinDCX conversion with 0.2% fee"""
+    try:
+        m1 = frm + to  # e.g., BTCINR
+        m2 = to + frm  # e.g., INRBTC doesn't exist, but USDTINR does
+        
+        if m1 in prices and prices[m1] > 0:
+            # m1 = frm+to = e.g., USDTINR? No, USDTINR is USDT+INR, price is INR per USDT
+            # If we have USDT->INR and market is USDTINR: INR = USDT * price
+            # If we have INR->USDT and market is USDTINR: USDT = INR / price
+            # General: market = base+quote, price = quote per base
+            # So: base->quote = amount * price, quote->base = amount / price
+            # Here m1 = frm+to, so frm=base, to=quote => base->quote
+            return amount * prices[m1] * 0.998
+        
+        if m2 in prices and prices[m2] > 0:
+            # m2 = to+frm, so to=base, frm=quote? Wait
+            # Example: frm=INR, to=USDT, m2=USDTINR exists. That's base=USDT quote=INR
+            # We want INR->USDT: quote->base = amount / price
+            return (amount / prices[m2]) * 0.998
+    except:
+        pass
     return None
 
 def check_all():
     global total_profit, trades, last_msg, best_opportunity
-    best_profit = -10
-    best_path = ""
-    
-    for path in PATHS:
-        amt = CAPITAL
-        valid = True
-        for i in range(len(path)-1):
-            frm, to = path[i], path[i+1]
-            new_amt = convert(amt, frm, to)
-            if new_amt is None:
-                valid = False
-                break
-            amt = new_amt
-        
-        if not valid:
-            continue
-        
-        profit_pct = (amt - CAPITAL) / CAPITAL * 100
-        
-        if profit_pct > best_profit:
-            best_profit = profit_pct
-            best_path = "->".join(path)
-            best_opportunity = f"{best_path} = {profit_pct:.3f}% (Final Rs.{amt:.2f})"
-        
-        if profit_pct >= MIN_PROFIT:
-            trades += 1
-            total_profit += (amt - CAPITAL)
-            last_msg = f"{datetime.now().strftime('%H:%M:%S')} - ✅ AUTO TRADED {best_path} | Profit {profit_pct:.3f}% | Rs.{amt:.2f}"
-            print(last_msg)
-            # REAL TRADE HERE after API approved: loop and execute market orders for each leg
-            time.sleep(25)
-            return
-    
-    last_msg = f"{datetime.now().strftime('%H:%M:%S')} - Scanning... Best {best_path} = {best_profit:.3f}% (Waiting >{MIN_PROFIT}%)"
-
-def loop():
-    while True:
-        try:
-            r = requests.get("https://api.coindcx.com/exchange/ticker", timeout=10).json()
-            for t in r:
-                prices[t['market']] = float(t['last_price'])
-            check_all()
-        except Exception as e:
-            last_msg = f"Error {e}"
-        time.sleep(8)
-
-threading.Thread(target=loop, daemon=True).start()
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
+    best_profit = -99
+    best_path_str =
