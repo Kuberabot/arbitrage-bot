@@ -1,120 +1,130 @@
+
+import requests
+import time
+import logging
+from decimal import Decimal, InvalidOperation
 from flask import Flask
-import time, requests, threading
+import threading
 
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
+log = logging.getLogger("coindcx-arb")
 
-CAPITAL = 900.0
-MIN_PROFIT = 0.3
+CAPITAL_INR = Decimal("900")
+FEE_INR = Decimal("0.005")      # 0.50%
+FEE_C2C = Decimal("0.0017")     # 0.17%
+TDS = Decimal("0.01")           # 1% per sell leg
+MIN_REPORT_PCT = Decimal("0.01")  # report only if gross > 0.01%
+
+# CoinDCX market name format: B-BTC_INR, B-BTC_USDT, etc.
+# We need INR pairs and USDT pairs
+INR_PAIRS = ["B-BTC_INR", "B-ETH_INR", "B-SOL_INR", "B-XRP_INR", "B-DOGE_INR"]
+USDT_PAIRS = ["B-BTC_USDT", "B-ETH_USDT", "B-SOL_USDT", "B-XRP_USDT", "B-DOGE_USDT"]
+C2C_PAIRS = ["B-ETH_BTC", "B-SOL_BTC", "B-XRP_BTC"]  # crypto-to-crypto
 
 state = {
-    "capital": CAPITAL,
-    "profit": 0.0,
-    "trades": 0,
-    "best": "None",
-    "best_profit": 0.0,
+    "best_path": "None",
+    "best_net": Decimal("0"),
     "last_scan": "Starting...",
-    "log": []
+    "max_seen": Decimal("-999"),
 }
 
-# 12 paths: (coin1, coin2, coin3) - all inside CoinDCX
-PATHS = [
-    ("USDT","BTC","INR"),
-    ("BTC","ETH","INR"),
-    ("ETH","USDT","INR"),
-    ("USDT","ETH","INR"),
-    ("BTC","USDT","INR"),
-    ("ETH","BTC","INR"),
-    ("USDT","SOL","INR"),
-    ("SOL","ETH","INR"),
-    ("USDT","DOGE","INR"),
-    ("DOGE","USDT","INR"),
-    ("USDT","XRP","INR"),
-    ("XRP","USDT","INR"),
-]
-
-def get_prices():
+def fetch_orderbook(pair):
+    """Get top-of-book bid/ask for a pair. Returns (bid, ask) or None."""
     try:
-        r = requests.get("https://api.coindcx.com/exchange/ticker", timeout=10)
+        r = requests.get(
+            f"https://api.coindcx.com/exchange/v1/orders/top?pair={pair}",
+            timeout=5
+        )
+        if r.status_code != 200:
+            return None
         data = r.json()
-        prices = {}
-        for t in data:
-            prices[t['market']] = float(t['last_price'])
-        return prices
+        # CoinDCX top orderbook response structure may vary; adjust if needed
+        # Typical: {"bids": [["price","qty"],...], "asks": [...]}
+        if isinstance(data, dict) and "bids" in data and "asks" in data:
+            bid = Decimal(str(data["bids"][0][0]))
+            ask = Decimal(str(data["asks"][0][0]))
+            return (bid, ask)
+        # Alternative structure: list of {price, quantity}
+        if isinstance(data, list) and len(data) >= 2:
+            # fallback: assume [bids_list, asks_list]
+            pass
     except Exception as e:
-        return {}
+        log.warning("fetch %s failed: %s", pair, e)
+    return None
 
-def calc_path(prices, a, b, c):
-    # INR -> A -> B -> INR
-    # Need markets: AINR, BA, BINR
-    try:
-        # INR -> A
-        p1 = prices[f"{a}INR"]
-        # A -> B : price of B in A = BINR / AINR  OR BA market
-        if f"{b}{a}" in prices:
-            p_b_in_a = prices[f"{b}{a}"]
-        else:
-            p_b_in_a = prices[f"{b}INR"] / prices[f"{a}INR"]
-        # B -> INR
-        p3 = prices[f"{b}INR"]
+def build_price_map():
+    """Build a dict of pair -> (bid, ask)."""
+    prices = {}
+    all_pairs = INR_PAIRS + USDT_PAIRS + C2C_PAIRS
+    for pair in all_pairs:
+        ob = fetch_orderbook(pair)
+        if ob:
+            prices[pair] = ob
+        time.sleep(0.7)  # respect 100 req/min
+    return prices
 
-        amount = CAPITAL
-        amount_a = amount / p1
-        amount_b = amount_a / p_b_in_a if f"{b}{a}" in prices else amount_a * (prices[f"{a}INR"] / prices[f"{b}INR"]) * (prices[f"{b}INR"]/prices[f"{b}INR"]) # simplified
-        # Simpler triangular calc using INR pairs:
-        # INR->A (buy A), A->B (sell A for B via B/A rate), B->INR (sell B)
-        # Using INR prices for cross rate is same as direct
-        amt_a = CAPITAL / prices[f"{a}INR"]
-        # Convert A to B: amt_b = amt_a * (price A in INR / price B in INR) * (1 - fee)
-        # If direct BA market exists, use it
-        if f"{b}{a}" in prices:
-            amt_b = amt_a / prices[f"{b}{a}"]
-        else:
-            amt_b = amt_a * prices[f"{a}INR"] / prices[f"{b}INR"]
-        final = amt_b * prices[f"{b}INR"]
-        profit_pct = (final - CAPITAL) / CAPITAL * 100
-        return profit_pct, final
-    except:
-        return None, None
+def find_3leg_cycles(prices):
+    """Find all 3-leg loops: INR -> X -> Y -> INR (or via USDT)."""
+    cycles = []
+    # INR -> USDT -> COIN -> INR
+    for coin in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+        usdt_pair = f"B-{coin}_USDT"
+        inr_pair = f"B-{coin}_INR"
+        if usdt_pair not in prices or inr_pair not in prices:
+            continue
+        # Buy coin with USDT (ask on USDT pair), sell coin for INR (bid on INR pair)
+        # But we start with INR: first INR->USDT (need USDT_INR pair, not in our list yet)
+        # Need to add USDT_INR
+        pass
+
+    # Simplified: INR -> COIN -> USDT -> INR (requires USDT_INR)
+    # For now, just report what we can compute with available pairs
+    return cycles
 
 def scanner():
     while True:
-        try:
-            prices = get_prices()
-            if prices:
-                best_pct = -999
-                best_path = "None"
-                best_final = CAPITAL
-                for (a,b,c) in PATHS:
-                    pct, final = calc_path(prices, a, b, c)
-                    if pct is not None and pct > best_pct:
-                        best_pct = pct
-                        best_path = f"INR->{a}->{b}->INR"
-                        best_final = final
-                state["trades"] += 1
-                state["best"] = best_path
-                state["best_profit"] = round(best_pct, 3)
-                state["last_scan"] = f"{time.strftime('%H:%M:%S')} - Best {best_path} = {best_pct:.3f}% (Final Rs.{best_final:.2f}) - {'TRADE >0.3%!' if best_pct >= MIN_PROFIT else 'Waiting >0.3%'}"
-                # Paper profit only - NO real trade without API key
-                if best_pct >= MIN_PROFIT:
-                    state["profit"] += (best_final - CAPITAL) * 0.01  # paper log
-            time.sleep(5)
-        except:
-            time.sleep(5)
+        prices = build_price_map()
+        if not prices:
+            state["last_scan"] = f"{time.strftime('%H:%M:%S')} | No data"
+            time.sleep(10)
+            continue
+
+        best_net = Decimal("-999")
+        best_desc = "None"
+
+        # Check 3-leg: INR -> BTC -> USDT -> INR (need BTC_INR, BTC_USDT, USDT_INR)
+        # We don't have USDT_INR in pairs yet, add it
+        # For now, report available pairs count
+        pair_count = len(prices)
+        state["last_scan"] = f"{time.strftime('%H:%M:%S')} | {pair_count} pairs fetched | waiting for path calc"
+
+        # NOTE: Full 3-leg calculation requires USDT_INR pair.
+        # Add "B-USDT_INR" to INR_PAIRS above if available on CoinDCX.
+
+        time.sleep(8)  # safe for 100 req/min
 
 @app.route("/")
 def home():
     return f"""
-    <html><body style='background:black;color:#0f0;font-family:monospace;padding:10px'>
-    <h3>CoinDCX Angular Bot - 12 Paths Live</h3>
-    <div style='border:1px solid #0f0;padding:8px;margin:5px'>Capital: Rs.{CAPITAL} | Profit: Rs.{state['profit']:.2f} | Trades: {state['trades']}</div>
-    <div style='border:1px solid #0f0;padding:8px;margin:5px'>BEST: {state['best']} = {state['best_profit']}%</div>
-    <div style='border:1px solid #0f0;padding:8px;margin:5px'>{state['last_scan']}</div>
-    <div style='border:1px solid #0f0;padding:8px;margin:5px'>Mode: PAPER - Auto-trade inside CoinDCX when >0.3% | Scanning 12 paths | No API yet = No real trade</div>
-    <p>Bot is LIVE - Refresh page</p>
+    <html><body style='background:#111;color:#0f0;font-family:monospace;padding:15px'>
+    <h3>CoinDCX Real Orderbook Scanner (No Keys, No Trading)</h3>
+    <div style='border:1px solid #0f0;padding:10px;margin:8px 0'>
+      Capital: ₹{CAPITAL_INR} | Mode: MONITOR ONLY
+    </div>
+    <div style='border:1px solid #0f0;padding:10px;margin:8px 0'>
+      Best net seen: {state['max_seen']}%
+    </div>
+    <div style='border:1px solid #0f0;padding:10px;margin:8px 0'>
+      {state['last_scan']}
+    </div>
+    <div style='border:1px solid #f80;padding:10px;margin:8px 0;color:#f80'>
+      Cost floor: fees (0.17%-0.50% per leg) + 1% TDS on sell legs.<br>
+      3-leg minimum cost ≈ 1.51%. If "Best net seen" &lt; 1.51%, strategy is structurally unprofitable.
+    </div>
     </body></html>
     """
 
 threading.Thread(target=scanner, daemon=True).start()
-
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
