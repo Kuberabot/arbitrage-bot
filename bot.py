@@ -1,91 +1,96 @@
-import os, time
-from decimal import Decimal
-import requests
+
+import requests, time
 from flask import Flask
+
 app = Flask(__name__)
-CAPITAL = Decimal("900")
-FEE_PCT = Decimal("0.001")
-PATHS = [
-    ("USDTINR","BTCUSDT","BTCINR","INR -> USDT -> BTC -> INR"),
-    ("USDTINR","ETHUSDT","ETHINR","INR -> USDT -> ETH -> INR"),
-    ("USDTINR","SOLUSDT","SOLINR","INR -> USDT -> SOL -> INR"),
-    ("USDTINR","XRPUSDT","XRPINR","INR -> USDT -> XRP -> INR"),
-    ("USDTINR","DOGEUSDT","DOGEINR","INR -> USDT -> DOGE -> INR"),
-    ("USDTINR","ADAUSDT","ADAINR","INR -> USDT -> ADA -> INR"),
-    ("USDTINR","LTCUSDT","LTCINR","INR -> USDT -> LTC -> INR"),
-    ("USDTINR","MATICUSDT","MATICINR","INR -> USDT -> MATIC -> INR"),
-    ("USDTINR","BNBUSDT","BNBINR","INR -> USDT -> BNB -> INR"),
-    ("USDTINR","TRXUSDT","TRXINR","INR -> USDT -> TRX -> INR"),
-]
-state = {"last_scan":"Never","results":[],"errors":"","debug":"No debug yet","last_fetch":0}
+CAPITAL = 900
+FEE = 0.001  # 0.1% per trade
 
-def fetch_all_prices():
-    headers = {"User-Agent":"Mozilla/5.0","Accept":"application/json"}
-    urls = ["https://api.coindcx.com/exchange/ticker","https://public.coindcx.com/exchange/ticker"]
-    logs=[]
-    for url in urls:
-        try:
-            r = requests.get(url, headers=headers, timeout=20)
-            logs.append(f"{url} -> {r.status_code} len {len(r.text)}")
-            if r.status_code != 200: continue
-            data = r.json()
-            prices={}
-            items = data if isinstance(data, list) else data.get("data",[])
-            for item in items:
-                try: prices[item.get("market","")]=(Decimal(str(item.get("bid"))), Decimal(str(item.get("ask"))))
-                except: continue
-            if prices:
-                state["debug"]=" | ".join(logs) + f" | got {len(prices)} markets"
-                return prices
-            logs.append("parsed 0")
-        except Exception as e:
-            logs.append(f"{url} ERR {e}")
-    state["debug"]=" | ".join(logs)
-    return {}
+# 55 COINS
+COINS = ["BTC","ETH","BNB","SOL","XRP","ADA","DOGE","TRX","LINK","AVAX","LTC","DOT","MATIC","ATOM","NEAR","ARB","OP","APT","SUI","PEPE","SHIB","UNI","ETC","FIL","ALGO","VET","ICP","HBAR","MKR","AAVE","SAND","MANA","AXS","FTM","EGLD","FLOW","THETA","XTZ","EOS","KAVA","GRT","CHZ","ENJ","GALA","LRC","IMX","STX","RNDR","FET","INJ","TIA","SEI","BONK","WIF","XLM"]
 
-def scan_once():
-    prices = fetch_all_prices()
-    state["last_scan"]=time.strftime("%d %b %I:%M:%S %p")
-    state["last_fetch"]=time.time()
-    if not prices:
-        state["errors"]="Ticker empty - see Debug"
-        state["results"]=[]
+last_data = []
+last_scan = "Never"
+
+def get_tickers():
+    try:
+        r = requests.get("https://api.coindcx.com/exchange/ticker", timeout=15)
+        d = {}
+        for x in r.json():
+            # 【entity-CoinDCX¦canonical_name=CoinDCX】 gives bid/ask
+            d[x['market']] = {'bid': float(x['bid']), 'ask': float(x['ask'])}
+        return d
+    except:
+        return {}
+
+def scan():
+    global last_data, last_scan
+    t = get_tickers()
+    if not t or 'USDTINR' not in t:
         return
-    results=[]
-    for p1,p2,p3,label in PATHS:
+    results = []
+    usdt_ask = t['USDTINR']['ask']
+    usdt_bid = t['USDTINR']['bid']
+
+    for c in COINS:
+        m_usdt = f"{c}USDT"
+        m_inr = f"{c}INR"
+        if m_usdt not in t or m_inr not in t:
+            continue
+        # FORWARD: INR -> USDT -> COIN -> INR
         try:
-            if p1 not in prices or p2 not in prices or p3 not in prices: continue
-            ask1=prices[p1][1]; ask2=prices[p2][1]; bid3=prices[p3][0]
-            if ask1==0 or ask2==0: continue
-            final=CAPITAL/ask1*(Decimal("1")-FEE_PCT)/ask2*(Decimal("1")-FEE_PCT)*bid3*(Decimal("1")-FEE_PCT)
-            profit=final-CAPITAL
-            results.append({"path":label,"final":round(float(final),2),"profit":round(float(profit),2),"profit_pct":round(float(profit/CAPITAL*100),3),"ask1":str(ask1),"ask2":str(ask2),"bid3":str(bid3)})
-        except: continue
-    results.sort(key=lambda x: x["profit_pct"], reverse=True)
-    state["results"]=results; state["errors"]=""
+            usdt = (CAPITAL / usdt_ask) * (1-FEE)
+            coin = (usdt / t[m_usdt]['ask']) * (1-FEE)
+            final_f = coin * t[m_inr]['bid'] * (1-FEE)
+            profit_f = final_f - CAPITAL
+            results.append((f"INR -> USDT -> {c} -> INR", final_f, profit_f, f"{usdt_ask} / {t[m_usdt]['ask']} / {t[m_inr]['bid']}"))
+        except: pass
+        # REVERSE: INR -> COIN -> USDT -> INR
+        try:
+            coin2 = (CAPITAL / t[m_inr]['ask']) * (1-FEE)
+            usdt2 = coin2 * t[m_usdt]['bid'] * (1-FEE)
+            final_r = usdt2 * usdt_bid * (1-FEE)
+            profit_r = final_r - CAPITAL
+            results.append((f"INR -> {c} -> USDT -> INR", final_r, profit_r, f"{t[m_inr]['ask']} / {t[m_usdt]['bid']} / {usdt_bid}"))
+        except: pass
+
+    results.sort(key=lambda x: x[2], reverse=True)
+    last_data = results
+    last_scan = time.strftime("%d %b %I:%M:%S %p")
+
+scan()
 
 @app.route("/")
 def home():
-    # Scan on every visit, but max once per 20 sec to avoid overload
-    if time.time() - state["last_fetch"] > 20:
-        scan_once()
-    rows=""
-    for r in state["results"]:
-        c="green" if r["profit"]>0 else "red"
-        rows+=f"<tr><td>{r['path']}</td><td>Rs.{r['final']}</td><td style='color:{c}'><b>Rs.{r['profit']} ({r['profit_pct']}%)</b></td><td>{r['ask1']} / {r['ask2']} / {r['bid3']}</td></tr>"
-    if not rows: rows=f"<tr><td colspan='4'>No data. Error: {state['errors']}</td></tr>"
-    return f"<html><head><meta http-equiv='refresh' content='30'></head><body style='font-family:Arial;padding:16px'><h2>CoinDCX Triangular Arbitrage - Capital Rs.900</h2><p>Last scan: {state['last_scan']} | Auto-refresh 30s</p><p><a href='/debug'>View Debug</a> | <a href='/scan'>Force Scan Now</a></p><table border='1' cellpadding='8'><tr><th>Path</th><th>Final INR</th><th>Profit</th><th>Ask1 / Ask2 / Bid3</th></tr>{rows}</table><p>Profit after 0.1% fee.</p></body></html>"
+    if not last_data:
+        scan()
+    html = f"""
+    <h2>CoinDCX Triangular Arbitrage - Capital Rs.900 - 55 Coins x 2 Directions</h2>
+    <p>Last scan: {last_scan} | Auto-refresh 30s | <a href='/scan'>Force Scan Now</a></p>
+    <table border=1 cellpadding=6 style='border-collapse:collapse; font-size:14px;'>
+    <tr><th>Path</th><th>Final INR</th><th>Profit</th><th>Ask1 / Ask2 / Bid3</th></tr>
+    """
+    for path, final, profit, prices in last_data:
+        pct = profit/CAPITAL*100
+        color = "green" if profit > 0 else "red"
+        bg = "#d4edda" if profit > 0 else ""
+        # Highlight big profit
+        if profit > 9:
+            bg = "#00ff00"
+        html += f"<tr style='background:{bg}'><td>{path}</td><td>Rs.{final:.2f}</td><td style='color:{color}'><b>Rs.{profit:.2f} ({pct:.3f}%)</b></td><td>{prices}</td></tr>"
+    html += "</table><p>Profit after 0.1% fee per trade. Green = Profitable. Bright Green = > Rs.9 (1%) - TRADE THIS!</p>"
+    html += "<meta http-equiv='refresh' content='30'>"
+    return html
+
+@app.route("/scan")
+def force():
+    scan()
+    return home()
 
 @app.route("/debug")
 def debug():
-    if time.time() - state["last_fetch"] > 20:
-        scan_once()
-    return f"<html><body style='font-family:Arial;padding:16px;word-break:break-all'><h2>Debug</h2><p>Last: {state['last_scan']}</p><p>{state['debug']}</p><p>Error: {state['errors']}</p><p><a href='/'>Back</a></p></body></html>"
+    t = get_tickers()
+    return f"Tickers: {len(t)} | USDTINR: {t.get('USDTINR')} | BTCUSDT: {t.get('BTCUSDT')}"
 
-@app.route("/scan")
-def scan():
-    scan_once()
-    return home()
-
-if __name__=="__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT",5000)))
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
