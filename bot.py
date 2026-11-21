@@ -1,10 +1,8 @@
-
 import os, time, hmac, hashlib, json, requests, threading
 from flask import Flask
 
 app = Flask(__name__)
 
-# --- CONFIG - SAFE, NO KEYS HERE ---
 CAPITAL = 900
 FEE = 0.001
 MIN_PROFIT_PCT = 1.5
@@ -12,7 +10,12 @@ COINS = ["BTC","ETH","BNB","SOL","XRP","ADA","DOGE","MATIC","LTC","TRX","AVAX","
 
 API_KEY = os.environ.get("COINDCX_API_KEY", "")
 API_SECRET = os.environ.get("COINDCX_SECRET", "").encode()
-AUTO_TRADE = os.environ.get("AUTO_TRADE", "FALSE") == "TRUE"
+AUTO_VAL = os.environ.get("AUTO_TRADE", "FALSE")
+if AUTO_VAL == "TRUE":
+    AUTO_TRADE = True
+else:
+    AUTO_TRADE = False
+
 BASE = "https://api.coindcx.com"
 
 last_data = []
@@ -24,31 +27,35 @@ traded_recently = {}
 def get_tickers():
     global last_error
     try:
-        r = requests.get(f"{BASE}/exchange/ticker", timeout=15)
+        r = requests.get(BASE + "/exchange/ticker", timeout=15)
         data = r.json()
         t = {}
         if isinstance(data, dict):
             data = data.get("data", [])
         for d in data:
             try:
-                market = d.get('market') or d.get('pair')
+                market = d.get('market')
+                if market is None:
+                    market = d.get('pair')
                 if market:
                     t[market] = {'bid': float(d['bid']), 'ask': float(d['ask'])}
             except:
                 pass
-        print(f"Tickers fetched: {len(t)} markets")
+        print("Tickers fetched")
+        print(len(t))
         if len(t) > 0:
-            last_error = f"OK - Got {len(t)} markets, sample: {list(t.keys())[:3]}"
+            last_error = "OK - Got markets"
         return t
     except Exception as e:
-        last_error = f"Ticker error: {e}"
+        last_error = "Ticker error"
         print(last_error)
+        print(e)
         return {}
 
 def place_order(market, side, quantity):
     if not API_KEY:
-        return {"error": "No API Key in Render Env"}
-    url = f"{BASE}/exchange/v1/orders/create"
+        return {"error": "No API Key"}
+    url = BASE + "/exchange/v1/orders/create"
     body = {
         "side": side,
         "order_type": "market_order",
@@ -70,11 +77,10 @@ def scan_and_trade():
         try:
             t = get_tickers()
             if not t:
-                print("Empty ticker, retry in 10s")
                 time.sleep(10)
                 continue
             if 'USDTINR' not in t:
-                last_error = f"USDTINR missing. Have: {list(t.keys())[:10]}"
+                last_error = "USDTINR missing"
                 print(last_error)
                 time.sleep(10)
                 continue
@@ -84,24 +90,25 @@ def scan_and_trade():
             results = []
 
             for c in COINS:
-                m_usdt = f"{c}USDT"
-                m_inr = f"{c}INR"
-                if m_usdt not in t or m_inr not in t:
+                m_usdt = c + "USDT"
+                m_inr = c + "INR"
+                if m_usdt not in t:
+                    continue
+                if m_inr not in t:
                     continue
 
-                # FORWARD: INR -> USDT -> COIN -> INR
                 try:
                     usdt = (CAPITAL / usdt_ask) * (1-FEE)
                     coin = (usdt / t[m_usdt]['ask']) * (1-FEE)
                     final_f = coin * t[m_inr]['bid'] * (1-FEE)
                     profit_f = final_f - CAPITAL
                     pct_f = (profit_f / CAPITAL) * 100
-                    results.append((f"INR -> USDT -> {c} -> INR", round(final_f,2), round(profit_f,2), round(pct_f,3)))
+                    results.append((c, final_f, profit_f, pct_f))
 
-                    # AUTO TRADE CHECK
                     if pct_f > MIN_PROFIT_PCT and AUTO_TRADE:
                         now = time.time()
-                        if now - traded_recently.get(c, 0) > 3600:
+                        last_t = traded_recently.get(c, 0)
+                        if now - last_t > 3600:
                             traded_recently[c] = now
                             qty_usdt = CAPITAL / usdt_ask
                             o1 = place_order("USDTINR", "buy", round(qty_usdt, 2))
@@ -109,40 +116,54 @@ def scan_and_trade():
                             o2 = place_order(m_usdt, "buy", round(coin, 4))
                             time.sleep(2)
                             o3 = place_order(m_inr, "sell", round(coin, 4))
-                            last_trade = f"TRADED {c} Profit {profit_f:.2f} | {o1} {o2} {o3}"
+                            last_trade = "TRADED"
                             print(last_trade)
-                except Exception as e:
+                            print(o1)
+                            print(o2)
+                            print(o3)
+                except:
                     pass
 
-                # REVERSE: INR -> COIN -> USDT -> INR
                 try:
                     coin2 = (CAPITAL / t[m_inr]['ask']) * (1-FEE)
                     usdt2 = coin2 * t[m_usdt]['bid'] * (1-FEE)
                     final_r = usdt2 * usdt_bid * (1-FEE)
                     profit_r = final_r - CAPITAL
                     pct_r = (profit_r / CAPITAL) * 100
-                    results.append((f"INR -> {c} -> USDT -> INR", round(final_r,2), round(profit_r,2), round(pct_r,3)))
+                    results.append((c, final_r, profit_r, pct_r))
                 except:
                     pass
 
             results.sort(key=lambda x: x[2], reverse=True)
             last_data = results[:20]
             last_scan = time.strftime("%d %b %I:%M:%S %p")
-            last_error = f"OK - Scanned {len(results)} paths"
-            print(f"Scan done {last_scan} Top: {last_data[0] if last_data else 'none'} | AutoTrade: {AUTO_TRADE}")
+            last_error = "OK - Scanned"
+            print("Scan done")
+            print(last_scan)
         except Exception as e:
-            last_error = f"Scan error: {e}"
+            last_error = "Scan error"
             print(last_error)
+            print(e)
         time.sleep(30)
 
 threading.Thread(target=scan_and_trade, daemon=True).start()
 
 @app.route("/")
 def home():
-    html = f"<h2>CoinDCX Auto-Trader - Capital Rs.{CAPITAL} | AutoTrade: {AUTO_TRADE}</h2>"
-    html += f"<p>Last scan: {last_scan} | Min Profit to Trade: {MIN_PROFIT_PCT}%</p>"
-    html += f"<p><b>Last Trade:</b> {last_trade}</p>"
-    html += f"<p><b>Debug:</b> {last_error}</p>"
-    html += "<table border=1 cellpadding=6><tr><th>Path</th><th>Final INR</th><th>Profit</th><th>%</th></tr>"
-    for path, final, profit, pct in last_data:
-        color = "green" if profit >
+    html = "<h2>CoinDCX Auto-Trader - Capital Rs.900</h2>"
+    html = html + "<p>Last scan: " + last_scan + "</p>"
+    html = html + "<p>AutoTrade: " + str(AUTO_TRADE) + "</p>"
+    html = html + "<p>Last Trade: " + last_trade + "</p>"
+    html = html + "<p>Debug: " + last_error + "</p>"
+    html = html + "<table border=1 cellpadding=6><tr><th>Coin</th><th>Final INR</th><th>Profit</th><th>%</th></tr>"
+    for coin_name, final, profit, pct in last_data:
+        if profit > 0:
+            color = "green"
+        else:
+            color = "red"
+        html = html + "<tr><td>" + coin_name + "</td><td>" + str(round(final,2)) + "</td><td style='color:" + color + "'>" + str(round(profit,2)) + "</td><td>" + str(round(pct,3)) + "%</td></tr>"
+    html = html + "</table><p>Auto-refresh 30s</p><meta http-equiv='refresh' content='30'>"
+    return html
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
