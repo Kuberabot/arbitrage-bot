@@ -11,6 +11,7 @@ TOTAL_COST_PERCENT = 1.30
 
 COINS = ["BTC","ETH","SOL","XRP","DOGE","ADA","AVAX","LINK","DOT","LTC","NEAR","APT","ARB","SUI","AXS","ICP","ATOM","FIL","OP","MATIC"]
 
+# ---------- 1. 【entity-CoinDCX¦canonical_name=CoinDCX】 ----------
 def get_coindcx():
     try:
         r = requests.get("https://api.coindcx.com/exchange/ticker", timeout=10)
@@ -21,78 +22,147 @@ def get_coindcx():
             if x['market'] == "USDTINR":
                 usdt_inr = float(x['last_price'])
             prices[x['market']] = float(x['last_price'])
-        return prices, usdt_inr
+        out = {}
+        for c in COINS:
+            if c+"INR" in prices and usdt_inr:
+                out[c] = prices[c+"INR"] / usdt_inr
+        return out, usdt_inr
     except Exception as e:
-        print("【entity-CoinDCX¦canonical_name=CoinDCX】 Error:", e)
+        print("CoinDCX Error:", e)
         return {}, 0
 
-def get_binance_all():
+# ---------- 2. Binance ----------
+def get_binance():
     urls = [
         "https://api.binance.us/api/v3/ticker/price",
         "https://data-api.binance.vision/api/v3/ticker/price",
-        "https://api.binance.com/api/v3/ticker/price",
-        "https://api1.binance.com/api/v3/ticker/price"
+        "https://api.binance.com/api/v3/ticker/price"
     ]
     for url in urls:
         try:
             r = requests.get(url, timeout=8)
             if r.status_code == 200:
                 data = r.json()
-                prices = {}
+                out = {}
                 for x in data:
-                    prices[x['symbol']] = float(x['price'])
-                print("【entity-Binance¦canonical_name=Binance】 OK from:", url)
-                return prices
-        except Exception as e:
-            print("【entity-Binance¦canonical_name=Binance】 fail:", url, e)
+                    if x['symbol'].endswith("USDT"):
+                        coin = x['symbol'].replace("USDT","")
+                        if coin in COINS:
+                            out[coin] = float(x['price'])
+                return out
+        except:
             continue
     return {}
 
+# ---------- 3. KuCoin ----------
+def get_kucoin():
+    try:
+        r = requests.get("https://api.kucoin.com/api/v1/market/allTickers", timeout=10)
+        data = r.json().get("data", {}).get("ticker", [])
+        out = {}
+        for x in data:
+            if x['symbol'].endswith("-USDT"):
+                coin = x['symbol'].replace("-USDT","")
+                if coin in COINS:
+                    out[coin] = float(x['last'])
+        return out
+    except Exception as e:
+        print("【entity-KuCoin¦canonical_name=KuCoin】 Error:", e)
+        return {}
+
+# ---------- 4. MEXC ----------
+def get_mexc():
+    try:
+        r = requests.get("https://api.mexc.com/api/v3/ticker/price", timeout=10)
+        data = r.json()
+        out = {}
+        for x in data:
+            if x['symbol'].endswith("USDT"):
+                coin = x['symbol'].replace("USDT","")
+                if coin in COINS:
+                    out[coin] = float(x['price'])
+        return out
+    except Exception as e:
+        print("MEXC Error:", e)
+        return {}
+
+# ---------- 5. WazirX ----------
+def get_wazirx():
+    try:
+        r = requests.get("https://api.wazirx.com/api/v2/tickers", timeout=10)
+        data = r.json()
+        out = {}
+        # Need USDTINR from WazirX
+        usdt_inr = float(data.get("usdtinr", {}).get("last", 0))
+        if not usdt_inr:
+            return {}
+        for c in COINS:
+            key = c.lower() + "usdt"
+            if key in data:
+                out[c] = float(data[key]['last'])  # already in USDT
+        return out
+    except Exception as e:
+        print("WazirX Error:", e)
+        return {}
+
 def scan():
     cdcx, usdt_inr = get_coindcx()
-    binall = get_binance_all()
-    if not cdcx or usdt_inr == 0:
-        return [], "【entity-CoinDCX¦canonical_name=CoinDCX】 API Error"
-    if not binall:
-        return [], "【entity-Binance¦canonical_name=Binance】 API Error"
+    binp = get_binance()
+    ku = get_kucoin()
+    mexc = get_mexc()
+    waz = get_wazirx()
+
+    all_prices = {
+        "【entity-CoinDCX¦canonical_name=CoinDCX】": cdcx,
+        "【entity-Binance¦canonical_name=Binance】": binp,
+        "【entity-KuCoin¦canonical_name=KuCoin】": ku,
+        "MEXC": mexc,
+        "WazirX": waz,
+    }
+    print("Loaded:", {k: len(v) for k,v in all_prices.items()})
+
     results = []
     for coin in COINS:
-        try:
-            cdcx_inr = cdcx.get(coin + "INR")
-            if not cdcx_inr:
-                continue
-            cdcx_usdt = cdcx_inr / usdt_inr
-            binp = binall.get(coin + "USDT")
-            if not binp:
-                continue
-            diff_pct = ((cdcx_usdt - binp) / binp) * 100
-            net_pct = diff_pct - TOTAL_COST_PERCENT
-            final_inr = CAPITAL + (CAPITAL * net_pct / 100)
-            results.append({"coin": coin, "path": "Buy Binance - Sell CoinDCX", "binp": round(binp, 4), "cdcxp": round(cdcx_usdt, 4), "diff": round(diff_pct, 3), "final": round(final_inr, 2), "profit_pct": round(net_pct, 3), "status": "PROFIT - TRADE" if net_pct >= MIN_PROFIT_PERCENT else "SKIP"})
-            diff2_pct = ((binp - cdcx_usdt) / cdcx_usdt) * 100
-            net2_pct = diff2_pct - TOTAL_COST_PERCENT
-            final2_inr = CAPITAL + (CAPITAL * net2_pct / 100)
-            results.append({"coin": coin, "path": "Buy CoinDCX - Sell Binance", "binp": round(binp, 4), "cdcxp": round(cdcx_usdt, 4), "diff": round(diff2_pct, 3), "final": round(final2_inr, 2), "profit_pct": round(net2_pct, 3), "status": "PROFIT - TRADE" if net2_pct >= MIN_PROFIT_PERCENT else "SKIP"})
-        except Exception as e:
-            print("Error", coin, e)
+        # Collect price from each exchange
+        lst = []
+        for ex, mp in all_prices.items():
+            if coin in mp and mp[coin] > 0:
+                lst.append((ex, mp[coin]))
+        if len(lst) < 2:
             continue
+        # Cheapest = Buy, Costliest = Sell
+        buy_ex, buy_price = min(lst, key=lambda x: x[1])
+        sell_ex, sell_price = max(lst, key=lambda x: x[1])
+        diff_pct = ((sell_price - buy_price) / buy_price) * 100
+        net_pct = diff_pct - TOTAL_COST_PERCENT
+        final_inr = CAPITAL + (CAPITAL * net_pct / 100)
+        results.append({
+            "coin": coin,
+            "buy_ex": buy_ex, "sell_ex": sell_ex,
+            "buy": round(buy_price, 4), "sell": round(sell_price, 4),
+            "diff": round(diff_pct, 3),
+            "final": round(final_inr, 2),
+            "profit_pct": round(net_pct, 3),
+            "status": "PROFIT - TRADE" if net_pct >= MIN_PROFIT_PERCENT else "SKIP",
+            "all": ", ".join([f"{e}:{p:.4f}" for e,p in lst])
+        })
     results.sort(key=lambda x: x['profit_pct'], reverse=True)
     scan_time = time.strftime("%d %b %Y %I:%M %p")
     return results, scan_time
 
 HTML = """
 <html><head><meta http-equiv="refresh" content="30">
-<style>body{font-family:Arial;padding:15px} table{width:100%;border-collapse:collapse} th,td{border:1px solid #ddd;padding:8px;text-align:center;font-size:13px} .green{color:green;font-weight:bold} .red{color:red} .safe{background:#d4edda}</style></head>
+<style>body{font-family:Arial;padding:12px} table{width:100%;border-collapse:collapse} th,td{border:1px solid #ddd;padding:7px;text-align:center;font-size:12px} .green{color:green;font-weight:bold} .red{color:red} .safe{background:#d4edda}</style></head>
 <body>
-<h2>REAL Arbitrage - CoinDCX vs Binance</h2>
+<h2>MULTI-EXCHANGE Arbitrage - 5 Exchanges</h2>
 <p><b>Capital:</b> Rs.900 | <b>Min Profit:</b> 2.0% | <b>Fees:</b> 1.30% | <b>Last Scan:</b> {{scan_time}}</p>
-<table><tr><th>Coin</th><th>Path</th><th>Binance</th><th>CoinDCX</th><th>Diff %</th><th>Final INR</th><th>Profit %</th><th>Status</th></tr>
+<table><tr><th>Coin</th><th>Buy On</th><th>Sell On</th><th>Buy Price</th><th>Sell Price</th><th>Diff %</th><th>Final INR</th><th>Profit %</th><th>Status</th></tr>
 {% for r in results %}
 <tr class="{{ 'safe' if r.profit_pct >= 2 else '' }}">
-<td><b>{{r.coin}}</b></td><td>{{r.path}}</td><td>{{r.binp}}</td><td>{{r.cdcxp}}</td><td>{{r.diff}}%</td><td>{{r.final}}</td><td class="{{ 'green' if r.profit_pct>0 else 'red' }}">{{r.profit_pct}}%</td><td><b>{{r.status}}</b></td></tr>
+<td><b>{{r.coin}}</b></td><td>{{r.buy_ex}}</td><td>{{r.sell_ex}}</td><td>{{r.buy}}</td><td>{{r.sell}}</td><td>{{r.diff}}%</td><td>{{r.final}}</td><td class="{{ 'green' if r.profit_pct>0 else 'red' }}">{{r.profit_pct}}%</td><td><b>{{r.status}}</b></td></tr>
 {% endfor %}
 </table>
-{% if not results %}<p style="color:red"><b>No data - wait 30 sec and refresh.</b></p>{% endif %}
+<p style="font-size:11px;color:#666">Note: This is scanning only. No auto buy/sell yet. Prices are live.</p>
 </body></html>
 """
 
