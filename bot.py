@@ -27,16 +27,26 @@ def get_coindcx():
         return {}, 0
 
 def get_binance_all():
-    try:
-        r = requests.get("https://data-api.binance.vision/api/v3/ticker/price", timeout=10)
-        data = r.json()
-        prices = {}
-        for x in data:
-            prices[x['symbol']] = float(x['price'])
-        return prices
-    except Exception as e:
-        print("【entity-Binance¦canonical_name=Binance】 Error:", e)
-        return {}
+    urls = [
+        "https://api.binance.us/api/v3/ticker/price",
+        "https://data-api.binance.vision/api/v3/ticker/price",
+        "https://api.binance.com/api/v3/ticker/price",
+        "https://api1.binance.com/api/v3/ticker/price"
+    ]
+    for url in urls:
+        try:
+            r = requests.get(url, timeout=8)
+            if r.status_code == 200:
+                data = r.json()
+                prices = {}
+                for x in data:
+                    prices[x['symbol']] = float(x['price'])
+                print("【entity-Binance¦canonical_name=Binance】 OK from:", url)
+                return prices
+        except Exception as e:
+            print("【entity-Binance¦canonical_name=Binance】 fail:", url, e)
+            continue
+    return {}
 
 def scan():
     cdcx, usdt_inr = get_coindcx()
@@ -58,7 +68,7 @@ def scan():
             diff_pct = ((cdcx_usdt - binp) / binp) * 100
             net_pct = diff_pct - TOTAL_COST_PERCENT
             final_inr = CAPITAL + (CAPITAL * net_pct / 100)
-            results.append({"coin": coin, "path": "Buy 【entity-Binance¦canonical_name=Binance】 - Sell 【entity-CoinDCX¦canonical_name=CoinDCX】", "binp": round(binp, 4), "cdcxp": round(cdcx_usdt, 4), "diff": round(diff_pct, 3), "final": round(final_inr, 2), "profit_pct": round(net_pct, 3), "status": "PROFIT - TRADE" if net_pct >= MIN_PROFIT_PERCENT else "SKIP"})
+            results.append({"coin": coin, "path": "Buy Binance - Sell CoinDCX", "binp": round(binp, 4), "cdcxp": round(cdcx_usdt, 4), "diff": round(diff_pct, 3), "final": round(final_inr, 2), "profit_pct": round(net_pct, 3), "status": "PROFIT - TRADE" if net_pct >= MIN_PROFIT_PERCENT else "SKIP"})
             diff2_pct = ((binp - cdcx_usdt) / cdcx_usdt) * 100
             net2_pct = diff2_pct - TOTAL_COST_PERCENT
             final2_inr = CAPITAL + (CAPITAL * net2_pct / 100)
